@@ -15,10 +15,10 @@
 
 #define MAX_EVENT_NUMBER 1024
 #define MAX_BUFFER_SIZE 1024
+#define MAX_CONNECTION_SIZE 50
 
 static int pipefd[2];//管道数组定义
 static int epollfd;//epoll描述符
-
 
 static void AddFd(int epoll_fd,int fd){
    //将fd添加到epoll_fd对应的内核事件表中
@@ -27,6 +27,7 @@ static void AddFd(int epoll_fd,int fd){
    event.events = EPOLLIN | EPOLLET;//监听输入，使用ET模式
    epoll_ctl(epoll_fd,EPOLL_CTL_ADD,fd,&event); //注册对应的事件
 }
+
 static void signal_handler(int signo){
 	//信号处理函数，主要处理SIGINT,SIGTERM信号
   if(signo == SIGINT)
@@ -38,27 +39,91 @@ static void signal_handler(int signo){
   send(pipefd[1],(char*)&msg,1,0);//管道也可以使用send函数，注意第二个参数要转换为char*
   errno = saveno;
 }
+
 void Addsig(int signo){
-    
+    struct sigaction sa;
+    memset(&sa,0,sizeof(sa));//内存块清零
+    sa.sig_handler = signal_handler;//填充信号处理器
+    sa.sa_flags |= SA_RESTART;//重新启动
+    signalset(&sa.sa_mask);//设置掩码
+    assert(sigaction(signo,&sa,NULL)!=-1);//判断返回值
 }
+
+static int SetNoBlocking(int fd){
+   int old_option = fcntl(fd,F_GETFL);
+   int new_option = old_option | O_NONBLOCK;
+   fcntl(fd,F_SETFL,new_option);
+   return old_option;//返回原来的状态
+}
+
 int main(int argc,char* argv[]){
    if(argc <= 2){
    	  printf("usage:%s ip_address port_number\n",argv[0]);
    	  exit(0);
    }
+
+   const char* server_ip = argv[1];
+   int port = atoi(argv[2]);//获取端口号
+
+   int AcceptFd = 0;//监听套接字描述符定义
+   struct sockaddr_in ServerAddr;
+   int len = sizeof(ServerAddr);
+
+   //创建套接字
+   AcceptFd = socket(AF_INET,SOCK_STREAM,0);
+   
+   bzero(&ServerAddr,sizeof(ServerAddr));//清除内存块
+
+   //填充协议族，使用IPV4
+   ServerAddr.sin_family = AF_INET;
+
+   //从命令行获取端口号，转化为网络字节序
+   ServerAddr.sin_port = htons(port);
+
+   //从命令行获取IP地址，并填充到套接字地址结构
+   if(inet_pton(AF_INET,server_ip,&Server.sin_addr) == nullptr){
+        printf("inet_ntop error\n");//转换IP地址
+        close(AcceptFd);//关闭描述符
+        exit(0);
+   }
+  
+   printf("bind in %s : %d\n", argv[1], ntohs(serv_addr.sin_port));
+
+   //绑定服务器套接字和监听描述符
+   if (bind(AcceptFd, (struct sockaddr*)&ServerAddr,len) < 0) {
+    printf("bind error\n");//绑定错误
+    exit(0);
+   }
+
+   //listen，将监听套接字从主动变为被动
+   if (listen(server_sock,MAX_CONNECTION_SIZE) < 0) {//listen，设置监听队列
+    printf("listen error\n");
+    return 0;
+   }
+
    epoll_event events[MAX_EVENT_NUMBER];
    epollfd = epoll_create(5);//一个epollfd最多绑定多少个描述符
    if(epollfd < 0){
    	  printf("can not get the epollfd!");
-   	  exit(-1);
+   	  exit(0);
    }
    AddFd(epollfd,listenfd);//将监听描述符加到epollfd对应的事件表上
+
+   int ret = 0;
+   ret = sockerpair(PF_UNIX,SOCK_STREAM,0,pipefd);//使用UNIX域套接字
+   if(ret == -1){
+      printf("create pipe error!");
+      exit(0);
+   }
+   AddFd(epollfd,pipefd[1]);//将监听管道读端描述符加到epoll中
+   //设置管道写端不阻塞
+   SetNoBlocking(pipe[0]);
+
    //注册信号处理函数
    AddSig(SIGINT);
    Addsig(SIGTERM);
    bool stop_server = false;//服务器是否工作的标志
    
-   int ret;
    char buffer[MAX_BUFFER_SIZE];//数据缓冲区
    //事件循环
    while(!stop_server){
