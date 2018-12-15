@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <string.h>
+#include <assert.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -40,12 +41,11 @@ static void signal_handler(int signo){
   errno = saveno;
 }
 
-void Addsig(int signo){
+void AddSig(int signo){
     struct sigaction sa;
     memset(&sa,0,sizeof(sa));//内存块清零
-    sa.sig_handler = signal_handler;//填充信号处理器
+    sa.sa_handler = signal_handler;//填充信号处理器
     sa.sa_flags |= SA_RESTART;//重新启动
-    signalset(&sa.sa_mask);//设置掩码
     assert(sigaction(signo,&sa,NULL)!=-1);//判断返回值
 }
 
@@ -81,13 +81,13 @@ int main(int argc,char* argv[]){
    ServerAddr.sin_port = htons(port);
 
    //从命令行获取IP地址，并填充到套接字地址结构
-   if(inet_pton(AF_INET,server_ip,&Server.sin_addr) == nullptr){
+   if(inet_pton(AF_INET,server_ip,&ServerAddr.sin_addr)==0){
         printf("inet_ntop error\n");//转换IP地址
         close(AcceptFd);//关闭描述符
         exit(0);
    }
   
-   printf("bind in %s : %d\n", argv[1], ntohs(serv_addr.sin_port));
+   printf("bind in %s : %d\n", argv[1], ntohs(ServerAddr.sin_port));
 
    //绑定服务器套接字和监听描述符
    if (bind(AcceptFd, (struct sockaddr*)&ServerAddr,len) < 0) {
@@ -96,58 +96,59 @@ int main(int argc,char* argv[]){
    }
 
    //listen，将监听套接字从主动变为被动
-   if (listen(server_sock,MAX_CONNECTION_SIZE) < 0) {//listen，设置监听队列
+   if (listen(AcceptFd,MAX_CONNECTION_SIZE) < 0) {//listen，设置监听队列
     printf("listen error\n");
     return 0;
    }
 
    epoll_event events[MAX_EVENT_NUMBER];
-   epollfd = epoll_create(5);//一个epollfd最多绑定多少个描述符
+   epollfd = epoll_create(10);//一个epollfd最多绑定多少个描述符
    if(epollfd < 0){
    	  printf("can not get the epollfd!");
    	  exit(0);
    }
-   AddFd(epollfd,listenfd);//将监听描述符加到epollfd对应的事件表上
+   AddFd(epollfd,AcceptFd);//将监听描述符加到epollfd对应的事件表上
 
    int ret = 0;
-   ret = sockerpair(PF_UNIX,SOCK_STREAM,0,pipefd);//使用UNIX域套接字
+   ret = socketpair(PF_UNIX,SOCK_STREAM,0,pipefd);//使用UNIX域套接字
    if(ret == -1){
       printf("create pipe error!");
       exit(0);
    }
    AddFd(epollfd,pipefd[1]);//将监听管道读端描述符加到epoll中
    //设置管道写端不阻塞
-   SetNoBlocking(pipe[0]);
+   SetNoBlocking(pipefd[0]);
 
    //注册信号处理函数
    AddSig(SIGINT);
-   Addsig(SIGTERM);
+   AddSig(SIGTERM);
    bool stop_server = false;//服务器是否工作的标志
    
    char buffer[MAX_BUFFER_SIZE];//数据缓冲区
    //事件循环
    while(!stop_server){
      int number = epoll_wait(epollfd,events,MAX_EVENT_NUMBER,-1);//等待事件触发返回
-     if(number < 0 && (errno != EINTR)){
+     if(number < 0 && (errno != EINTR)){ //发生错误
           printf("epoll error!");
           break;
      }
      //循环处理就绪事件，遍历events数组
      for(int i = 0;i < number;i++){
      	int sockfd = events[i].data.fd; //获取就绪事件的描述符
-     	if(sockfd == listenfd){
+     	if(sockfd == AcceptFd){
      		//有新连接到来
-     		struct sockaddress_in client_addr;
+     		struct sockaddr_in client_addr;
      		socklen_t client_len = sizeof(client_addr);//客户端地址长度
-     		int conn_fd = accept(listenfd,(struct sockaddr*)client_addr,&client_len);
+        //注意第二个参数必须是指针，然后执行强制类型转换
+     		int conn_fd = accept(AcceptFd,(struct sockaddr*)&client_addr,(unsigned int *)&client_len);
      		AddFd(epollfd,conn_fd); //将新连接的套接字描述符加到epoll内核事件表
      	}
-     	else if(sockfd == pipefd[0] && (events[i].eventS & EPOLLIN)){
+     	else if(sockfd == pipefd[0] && (events[i].events & EPOLLIN)){
      		//处理信号处理程序传输过来的数据
-     		int sig;
+     		//int sig;
      		char signals[50];
      		ret = recv(sockfd,signals,sizeof(signals),0);//使用recv读取数据
-     		if(recv == -1){
+     		if(ret == -1){ //检验返回值
      			printf("receive error!");
      			continue;
      		}
@@ -180,7 +181,7 @@ int main(int argc,char* argv[]){
             memset(buffer,0,sizeof(buffer));
             ret = recv(sockfd,buffer,sizeof(buffer)-1,0);//接收用户发送过来的数据，并存储到缓冲区
             //打印信息
-            printf("get %d bytes of data from the client:%d\n",buffer,sockfd);
+            printf("get %d bytes of data from the client:%d\n",ret,sockfd);
             //回射给客户端
             buffer[MAX_BUFFER_SIZE-1]='\0';//空字符结尾
             write(sockfd,buffer,sizeof(buffer));
@@ -192,7 +193,7 @@ int main(int argc,char* argv[]){
      }
    }
    //程序退出，释放资源
-   close(listenfd);
+   close(AcceptFd);
    close(pipefd[0]);
    close(pipefd[1]);
    printf("The server is going to stop!");
