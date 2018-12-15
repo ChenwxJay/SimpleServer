@@ -192,6 +192,7 @@ int main(int argc,char* argv[]){
      	}
      }
    }
+   sleep(3000);
    //程序退出，释放资源
    close(AcceptFd);
    close(pipefd[0]);
