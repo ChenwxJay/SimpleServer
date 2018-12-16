@@ -21,12 +21,20 @@
 static int pipefd[2];//管道数组定义
 static int epollfd;//epoll描述符
 
+static int SetNoBlocking(int fd){
+   int old_option = fcntl(fd,F_GETFL);
+   int new_option = old_option | O_NONBLOCK;
+   fcntl(fd,F_SETFL,new_option);
+   return old_option;//返回原来的状态
+}
+
 static void AddFd(int epoll_fd,int fd){
    //将fd添加到epoll_fd对应的内核事件表中
    epoll_event event;
    event.data.fd = fd;//填充需要监听的文件描述符
    event.events = EPOLLIN | EPOLLET;//监听输入，使用ET模式
    epoll_ctl(epoll_fd,EPOLL_CTL_ADD,fd,&event); //注册对应的事件
+   SetNoBlocking(fd);//设置非阻塞套接字
 }
 
 static void signal_handler(int signo){
@@ -47,13 +55,6 @@ void AddSig(int signo){
     sa.sa_handler = signal_handler;//填充信号处理器
     sa.sa_flags |= SA_RESTART;//重新启动
     assert(sigaction(signo,&sa,NULL)!=-1);//判断返回值
-}
-
-static int SetNoBlocking(int fd){
-   int old_option = fcntl(fd,F_GETFL);
-   int new_option = old_option | O_NONBLOCK;
-   fcntl(fd,F_SETFL,new_option);
-   return old_option;//返回原来的状态
 }
 
 int main(int argc,char* argv[]){
@@ -108,6 +109,7 @@ int main(int argc,char* argv[]){
    	  exit(0);
    }
    AddFd(epollfd,AcceptFd);//将监听描述符加到epollfd对应的事件表上
+   AddFd(epoll_fd,UdpFd);//添加UDP 套接字描述符
 
    int ret = 0;
    ret = socketpair(PF_UNIX,SOCK_STREAM,0,pipefd);//使用UNIX域套接字
@@ -133,33 +135,63 @@ int main(int argc,char* argv[]){
           break;
      }
      //循环处理就绪事件，遍历events数组
-     for(int i = 0;i < number;i++){
+     for(int i = 0;i < number;i++)
+     {
      	int sockfd = events[i].data.fd; //获取就绪事件的描述符
      	if(sockfd == AcceptFd){
      		//有新连接到来
      		struct sockaddr_in client_addr;
      		socklen_t client_len = sizeof(client_addr);//客户端地址长度
         //注意第二个参数必须是指针，然后执行强制类型转换
-     		int conn_fd = accept(AcceptFd,(struct sockaddr*)&client_addr,(unsigned int *)&client_len);
+     		int conn_fd = accept(AcceptFd,(struct sockaddr*)&client_addr,&client_len);
      		AddFd(epollfd,conn_fd); //将新连接的套接字描述符加到epoll内核事件表
      	}
+      else if(sockfd == UdpFd){ //UDP套接字上面有数据到来
+         memset(buffer,'\0',sizeof(buffer));
+         struct sockaddr_in client_addr;
+         socklen_t client_len = sizeof(client_addr);
+         char* client_ip;
+         //UDP套接字，直接读写即可
+         ret = recvfrom(UdpFd,buffer,MAX_BUFFER_SIZE-1,0,
+                        (struct sockaddr*)&client_addr,&client_len);//使用recvfrom函数接收数据
+         if(ret > 0){
+            printf("Receive %d bytes data from the client: ip %s,port %d",inet_ntop(AF_INET,client_ip,&client_addr.sin_addr),ntohs(client_len));
+            //回射给客户端
+            sendto(UdpFd,buffer,MAX_BUFFER_SIZE-1,0,
+                   (struct sockaddr*)&client_addr,&client_len);      
+         } 
+         else if(ret == 0){
+            printf("The client is closed!");
+            //close(UdpFd);
+            continue;
+         }
+         else{
+            printf("Some errors have occured on the UDP socket!");
+            continue;
+         }
+      }
      	else if(sockfd == pipefd[0] && (events[i].events & EPOLLIN)){
      		//处理信号处理程序传输过来的数据
      		//int sig;
      		char signals[50];
      		ret = recv(sockfd,signals,sizeof(signals),0);//使用recv读取数据
      		if(ret == -1){ //检验返回值
-     			printf("receive error!");
-     			continue;
+          //如果是阻塞套接字，应该增加本段处理
+          if((errno == EAGAIN) || (errno == EWOULDBLOCK))//阻塞套接字
+     			  printf("receive message would be block!");
+          else
+            printf("receive error!");
+          continue;//跳过当前套接字不处理
      		}
      		else if(ret == 0){
-     			printf("receive finished!");
-     			continue;
+     			  printf("receive finished!");
+            close(sockfd);//关闭当前套接字，通信已经结束
+     			  continue;
      		}
-     		else{ //处理传送给主循环的信息，遍历消息数组
+     	  else{ //处理传送给主循环的信息，遍历消息数组
      			  for(int i=0;i < ret;i++){
      				  switch(signals[i])
-     				 {
+     				 {  
      				    case SIGINT: 
      				    {    
      				       	 printf("server will be killed!");
@@ -171,32 +203,53 @@ int main(int argc,char* argv[]){
                      printf("server will be terminated!");
                      stop_server = true;
                      break;
-                }
-     				  }
-     			   }
-     		    }
-     	    }
-     	else if(events[i].events && EPOLLIN){
+                }//case
+     				  }//switch
+     			  }//for
+     		 }//else
+     	}
+     	else if(events[i].events && EPOLLIN){ //套接字上有数据
      		//处理客户连接传送过来的数据
+        while(1) //loop
+        {
             memset(buffer,0,sizeof(buffer));
             ret = recv(sockfd,buffer,sizeof(buffer)-1,0);//接收用户发送过来的数据，并存储到缓冲区
             //打印信息
-            printf("get %d bytes of data from the client:%d\n",ret,sockfd);
-            //回射给客户端
-            buffer[MAX_BUFFER_SIZE-1]='\0';//空字符结尾
-            write(sockfd,buffer,sizeof(buffer));
-     	}
-     	else{
+            if(ret < 0)
+            {
+               if((errno == EAGAIN) || (errno == EWOULDBLOCK))//阻塞套接字
+                  printf("receive message would be block!");
+               else
+                  printf("receive error!");
+               close(sockfd);//关闭套接字，下一次不会再触发
+               break;
+            }
+            else if(ret == 0){
+               close(sockfd);
+               printf("The connection has been closed!");
+               break;
+            }
+            else{
+               printf("get %d bytes of data from the client:%d\n",ret,sockfd);
+               //回射给客户端
+               buffer[MAX_BUFFER_SIZE-1]='\0';//空字符结尾
+               write(sockfd,buffer,sizeof(buffer));
+            }
+     	 }//while loop
+     }
+      else
+      {
      	    printf("can not handle the event!");
      	    continue;
-     	}
-     }
-   }
-   sleep(3000);
-   //程序退出，释放资源
-   close(AcceptFd);
-   close(pipefd[0]);
-   close(pipefd[1]);
-   printf("The server is going to stop!");
-   return 0;
+      }
+    }
+  }
+  sleep(3000);
+  //程序退出，释放资源
+  close(AcceptFd);
+  close(pipefd[0]);
+  close(pipefd[1]);
+  close(UdpFd);
+  printf("The server is going to stop!");
+  return 0;
 }
