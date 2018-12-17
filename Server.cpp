@@ -40,9 +40,9 @@ static void AddFd(int epoll_fd,int fd){
 static void signal_handler(int signo){
 	//信号处理函数，主要处理SIGINT,SIGTERM信号
   if(signo == SIGINT)
-     printf("sigint signal!");
+     printf("sigint signal!\n");
   else if(signo == SIGTERM)
-     printf("sigterm signal!");
+     printf("sigterm signal!\n");
   int saveno = errno;
   int msg = signo;
   send(pipefd[1],(char*)&msg,1,0);//管道也可以使用send函数，注意第二个参数要转换为char*
@@ -65,7 +65,8 @@ int main(int argc,char* argv[]){
 
    const char* server_ip = argv[1];
    int port = atoi(argv[2]);//获取端口号
-
+   
+   int ret = 0;
    int AcceptFd = 0;//监听套接字描述符定义
    struct sockaddr_in ServerAddr;
    int len = sizeof(ServerAddr);
@@ -97,29 +98,49 @@ int main(int argc,char* argv[]){
    }
 
    //listen，将监听套接字从主动变为被动
-   if (listen(AcceptFd,MAX_CONNECTION_SIZE) < 0) {//listen，设置监听队列
+   if (listen(AcceptFd,MAX_CONNECTION_SIZE) == -1) {//listen，设置监听队列
     printf("listen error\n");
     return 0;
    }
+   
+   //创建UDP套接字，获得描述符，并绑定服务器端口
+   int UdpFd = socket(AF_INET,SOCK_DGRAM,0);
+   assert(UdpFd >= 0);
 
+   bzero(&ServerAddr,sizeof(ServerAddr));
+   //填充协议族，使用IPV4
+   ServerAddr.sin_family = AF_INET;
+   //从命令行获取端口号，转化为网络字节序
+   ServerAddr.sin_port = htons(port);
+   //从命令行获取IP地址，并填充到套接字地址结构
+   if(inet_pton(AF_INET,server_ip,&ServerAddr.sin_addr)==0){
+        printf("inet_ntop error\n");//转换IP地址
+        close(AcceptFd);//关闭描述符
+        exit(0);
+   }
+   //绑定服务器地址和端口
+   ret = bind(UdpFd,(struct sockaddr*)&ServerAddr,sizeof(ServerAddr));
+   assert(ret != -1);//校验返回值
+   
    epoll_event events[MAX_EVENT_NUMBER];
    epollfd = epoll_create(10);//一个epollfd最多绑定多少个描述符
    if(epollfd < 0){
-   	  printf("can not get the epollfd!");
+   	  printf("can not get the epollfd!\n");
    	  exit(0);
    }
-   AddFd(epollfd,AcceptFd);//将监听描述符加到epollfd对应的事件表上
-   AddFd(epoll_fd,UdpFd);//添加UDP 套接字描述符
 
-   int ret = 0;
-   ret = socketpair(PF_UNIX,SOCK_STREAM,0,pipefd);//使用UNIX域套接字
+   AddFd(epollfd,AcceptFd);//将监听描述符加到epollfd对应的事件表上
+   AddFd(epollfd,UdpFd);//添加UDP 套接字描述符
+
+   //socketpair函数用来创建双向管道，成功时返回0，失败返回-1，并设置errno
+   ret = socketpair(AF_UNIX,SOCK_STREAM,0,pipefd);//使用UNIX域套接字
    if(ret == -1){
-      printf("create pipe error!");
+      printf("create pipe error!\n");
       exit(0);
    }
-   AddFd(epollfd,pipefd[1]);//将监听管道读端描述符加到epoll中
-   //设置管道写端不阻塞
-   SetNoBlocking(pipefd[0]);
+   AddFd(epollfd,pipefd[0]);//将监听管道描述符加到epoll中
+   //设置管道不阻塞
+   SetNoBlocking(pipefd[1]);//第二个设置为非阻塞
 
    //注册信号处理函数
    AddSig(SIGINT);
@@ -135,7 +156,7 @@ int main(int argc,char* argv[]){
           break;
      }
      //循环处理就绪事件，遍历events数组
-     for(int i = 0;i < number;i++)
+     for(int i = 0;i < number;i++) //终止所有循环
      {
      	int sockfd = events[i].data.fd; //获取就绪事件的描述符
      	if(sockfd == AcceptFd){
@@ -150,15 +171,15 @@ int main(int argc,char* argv[]){
          memset(buffer,'\0',sizeof(buffer));
          struct sockaddr_in client_addr;
          socklen_t client_len = sizeof(client_addr);
-         char* client_ip;
+         //char* client_ip;
          //UDP套接字，直接读写即可
          ret = recvfrom(UdpFd,buffer,MAX_BUFFER_SIZE-1,0,
                         (struct sockaddr*)&client_addr,&client_len);//使用recvfrom函数接收数据
          if(ret > 0){
-            printf("Receive %d bytes data from the client: ip %s,port %d",inet_ntop(AF_INET,client_ip,&client_addr.sin_addr),ntohs(client_len));
+            //printf("Receive %d bytes data from the client: ip %s,port %d",inet_ntop(AF_INET,client_ip,&client_addr.sin_addr),ntohs(client_len));
             //回射给客户端
             sendto(UdpFd,buffer,MAX_BUFFER_SIZE-1,0,
-                   (struct sockaddr*)&client_addr,&client_len);      
+                   (struct sockaddr*)&client_addr,client_len);      
          } 
          else if(ret == 0){
             printf("The client is closed!");
@@ -174,13 +195,14 @@ int main(int argc,char* argv[]){
      		//处理信号处理程序传输过来的数据
      		//int sig;
      		char signals[50];
-     		ret = recv(sockfd,signals,sizeof(signals),0);//使用recv读取数据
+        //注意这里是从管道读数据，而不是从套接字读
+     		ret = recv(pipefd[0],signals,sizeof(signals),0);//使用recv读取数据
      		if(ret == -1){ //检验返回值
           //如果是阻塞套接字，应该增加本段处理
           if((errno == EAGAIN) || (errno == EWOULDBLOCK))//阻塞套接字
-     			  printf("receive message would be block!");
+     			  printf("receive message would be block!\n");
           else
-            printf("receive error!");
+            printf("receive error!\n");
           continue;//跳过当前套接字不处理
      		}
      		else if(ret == 0){
@@ -189,51 +211,57 @@ int main(int argc,char* argv[]){
      			  continue;
      		}
      	  else{ //处理传送给主循环的信息，遍历消息数组
-     			  for(int i=0;i < ret;i++){
+     			  for(int i = 0;i < ret;i++){
      				  switch(signals[i])
      				 {  
      				    case SIGINT: 
      				    {    
-     				       	 printf("server will be killed!");
+     				       	 printf("server will be killed!\n");
                      stop_server = true;
                      break;
                 }
                 case SIGTERM:
                 {
-                     printf("server will be terminated!");
-                     stop_server = true;
-                     break;
+                     printf("server will be terminated!\n");
+                     exit(1);
                 }//case
+                default:
+                    printf("cannot identify the signal!\n");
      				  }//switch
+             if(stop_server == true){
+                  printf("Break out of the switch!\n");
+                  break;
+              }//if
      			  }//for
      		 }//else
      	}
      	else if(events[i].events && EPOLLIN){ //套接字上有数据
-     		//处理客户连接传送过来的数据
+             		//处理客户连接传送过来的数据
         while(1) //loop
-        {
+        {   //接收数据
             memset(buffer,0,sizeof(buffer));
             ret = recv(sockfd,buffer,sizeof(buffer)-1,0);//接收用户发送过来的数据，并存储到缓冲区
             //打印信息
             if(ret < 0)
-            {
+            {  //设置为非阻塞，本来应该等待，立即返回，正常情况
                if((errno == EAGAIN) || (errno == EWOULDBLOCK))//阻塞套接字
-                  printf("receive message would be block!");
-               else
+                  printf("receive message would be block!\n");
+               else{  //只有在发生错误才关闭套接字
                   printf("receive error!");
-               close(sockfd);//关闭套接字，下一次不会再触发
+                  close(sockfd);//关闭套接字，下一次不会再触发
+               }
                break;
             }
             else if(ret == 0){
                close(sockfd);
-               printf("The connection has been closed!");
+               printf("The connection has been closed!\n");
                break;
             }
             else{
                printf("get %d bytes of data from the client:%d\n",ret,sockfd);
                //回射给客户端
-               buffer[MAX_BUFFER_SIZE-1]='\0';//空字符结尾
-               write(sockfd,buffer,sizeof(buffer));
+               //buffer[MAX_BUFFER_SIZE-1]='\0';//空字符结尾
+               send(sockfd,buffer,ret,0);
             }
      	 }//while loop
      }
@@ -250,6 +278,6 @@ int main(int argc,char* argv[]){
   close(pipefd[0]);
   close(pipefd[1]);
   close(UdpFd);
-  printf("The server is going to stop!");
+  printf("The server is going to stop!\n");
   return 0;
 }
