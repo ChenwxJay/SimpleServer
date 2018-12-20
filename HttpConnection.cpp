@@ -17,7 +17,7 @@ void ModifyFd(int epollfd,int fd,int ev){
   epoll_ctl(epollfd,EPOLL_CTL_MOD,fd,&event);
 }
 
-//关闭
+//关闭Http连接
 void HttpConnection::CloseConnection(bool real_close){
    if(real_close == true && SockFd != -1){
        printf("The connection will be closed!");
@@ -85,3 +85,42 @@ bool HttpConnection::read(){
    return true;
 }
 
+//解析Http请求的请求行，返回状态码，用枚举类型变量
+HttpConnection::HTTP_CODE HttpConnection::ParseRequestLine(char* text){
+	printf("Parse the header of the request!");
+	Url = strpbrk(text,"\t");
+	if(Url == nullptr){
+		return BAD_REQUEST;
+	}
+	*Url++ = '\0';//先使用后++,写入空字符
+
+	char* method = text;
+	if(strcasecmp(text, "GET" ) == 0){
+		Method = GET;//GET请求，填充枚举类型变量
+	}
+	else{ //其他方法都返回错误请求，暂时只处理GET请求
+		return BAD_REQUEST;
+	}
+
+	Url += strspn(Url," \t");
+	Version = strpbrk(Url," \t");
+	if(!Version){
+       return BAD_REQUEST;//错误请求
+	}
+
+
+   
+}
+
+void HttpConnection::Process(){
+	HTTP_CODE read_ret = ProcessRead();//处理读请求，获取状态码
+	if(read_ret == NO_REQUEST){
+		ModifyFd(Epollfd,SockFd,EPOLLIN);
+		return;
+	} 
+	bool write_ret = ProcessWrite();//处理写请求
+	if(!write_ret){
+		CloseConnection();
+	}
+	
+}

@@ -76,7 +76,8 @@ private:
     char WriteBuffer[BUFFER_MAX_SIZE];
     //写缓冲待发送的字节数
     int  ToBeSendDataSize;
-
+   
+   CHECK_STATE CheckState;//检查状态
     //客户请求的目标文件的完整路径
     char FileName[FILENAME_MAX_LEN];
     //客户请求的目标文件名
