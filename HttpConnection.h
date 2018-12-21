@@ -77,11 +77,14 @@ private:
     //写缓冲待发送的字节数
     int  ToBeSendDataSize;
    
-   CHECK_STATE CheckState;//检查状态
+    CHECK_STATE CheckState;//检查状态
     //客户请求的目标文件的完整路径
     char FileName[FILENAME_MAX_LEN];
     //客户请求的目标文件名
 
-
+    //该连接是否处于keep-alive状态
+    bool Linger;
+    //Http请求头部字段内容(如果有)
+    long ContentLength;
 
 }
