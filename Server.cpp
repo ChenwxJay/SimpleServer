@@ -17,6 +17,20 @@
 #define MAX_EVENT_NUMBER 1024
 #define MAX_BUFFER_SIZE 1024
 #define MAX_CONNECTION_SIZE 50
+#define MAX_FD_NUMBER 65535 
+#define DEFAULT_BUFFER_SIZE 64
+
+//客户端相关信息结构体封装
+class ClientData{
+private:
+   sockaddr_in address;
+   int port;
+   char* WriteData;
+   char buffer[DEFAULT_BUFFER_SIZE];
+public:
+   
+};
+
 
 static int pipefd[2];//管道数组定义
 static int epollfd;//epoll描述符

@@ -107,11 +107,8 @@ HttpConnection::HTTP_CODE HttpConnection::ParseRequestLine(char* text){
 	if(!Version){
        return BAD_REQUEST;//错误请求
 	}
-
-
-   
 }
-
+//由线程池中的工作线程调用，这是处理Http请求的入口函数
 void HttpConnection::Process(){
 	HTTP_CODE read_ret = ProcessRead();//处理读请求，获取状态码
 	if(read_ret == NO_REQUEST){
@@ -128,6 +125,8 @@ void HttpConnection::Process(){
 bool HttpConnection::ProcessWrite(){
 	
 }
+
+//主状态机，处理Http请求，需要调用其他函数
 HttpConnection::HTTP_CODE HttpConnection::ProcessRead(){
 	LINE_STATUS line_status = LINE_OK;
 	HTTP_CODE ret = NO_REQUEST;//初始化状态码，目前正常
@@ -157,13 +156,30 @@ HttpConnection::HTTP_CODE HttpConnection::ProcessRead(){
             	if(ret == BAD_REQUEST){ //出错
             		return BAD_REQUEST;//直接错误返回
             	}
+            	else if(ret = GET_REQUEST) //请求头部分析完成，处理请求
+            	{
+            		return HandleRequest();//处理请求
+            	}	
             	break;
+            }
+            case CHECK_CONTENT:
+            {
+            	ret = ParseContent(text);//解析Http请求内容
+            	if(ret == GET_REQUEST){
+            		return HandleRequest();//处理请求
+            	}
+            	line_status = LINE_OPEN;//设置行状态
+            	break;
+            }
+            default:{
+            	return INTERNAL_ERROR;
             }
         }
 	}
+	return NO_REQUEST;//正常执行
 }
 HttpConnection::LINE_STATUS HttpConnection::ParseRequestLineLine(char* text){
-
+   
 }
 //解析Http请求头部字段函数
 HttpConnection:: HTTP_CODE HttpConnection::ParseHeaders(char* text){
@@ -208,4 +224,179 @@ HttpConnection::HTTP_CODE HttpConnection::ParseContent(char* text){
 		return GET_REQUEST;
 	}
 	return NO_REQUEST;
+}
+
+bool HttpConnection::ProcessWrite(HTTP_CODE ret){
+    switch(ret)
+    {
+       case INTERNAL_ERROR://服务器内部错误，返回500错误
+       {
+       	  AddStatusLine(500,Error_500_Title);//添加状态行信息
+       	  AddHeaders(strlen(Error_500_Form));//添加头部信息
+          if(! AddContent(Error_500_Form)){
+          	   return false;//添加失败，返回false
+          }	  
+          break;
+       }
+       case BAD_REQUEST: //请求出错，返回400错误
+       {
+          AddStatusLine(400,Error_400_Title);//添加状态行信息
+          AddHeaders(strlen(Error_400_Form));//添加头部信息
+          if(! AddContent(Error_400_Form)){
+          	   return false;//添加失败，返回false
+          }	  
+          break;
+       }
+       case NO_RESOURCE:
+       {
+       	 AddStatusLine(404,Error_404_Title);//添加状态行，404
+       	 AddHeaders(strlen(Error_404_Form));
+       	 if(!AddContent(Error_404_Form)){ //添加404页面内容，并判断是否成功
+              return false;
+       	 }
+       	 break;
+       }
+       case FORBIDDEN_REQUEST:
+       {
+       	 AddStatusLine(404,Error_403_Title);//添加状态行，403
+       	 AddHeaders(strlen(Error_403_Form));
+       	 if(!AddContent(Error_403_Form)){ //添加403页面内容，并判断是否成功
+              return false;
+       	 }
+       	 break;
+       }
+       case FILE_REQUEST:
+       {
+         AddStatusLine(200,Ok_200_Title);//添加状态行，200
+         if(FileStat.size != 0){
+         	AddHeaders(FileStat.size);
+         	Iv[0].iov_base = WriteBuffer;//写入数据
+         	Iv[0].iov_len = WritePos;
+         	Iv[1].iov_base = FileAddress;
+         	Iv[1].iov_len = FileStat.size;
+         	IvCount = 2;//写入2个
+         	return true; 
+         }
+         else{
+         	//定义一个html字符串
+         	const char* ok_string = "<html><head></head><body></body></html>";
+         	AddHeaders(strlen(ok_string));//添加头部信息
+         	if(!AddContent(ok_string)){
+         		return false;
+         	}
+         }
+       }
+       default:
+       {
+       	 return false;
+       }
+    }
+     Iv[0].iov_base = WriteBuffer;//填充缓冲区
+     Iv[0].iov_len = WritePos;
+     IvCount = 1;//写1个
+     return true; 
+}
+bool HttpConnection::Write(){
+	int temp = 0;
+	int bytes_to_send = WritePos;
+	int bytes_have_send = 0;
+	if(bytes_to_send == 0){
+		ModifyFd(EpollFd,SockFd,EPOLLIN);//修改文件描述符状态
+		Init();//重新初始化
+		return true;
+	}
+	//死循环
+	while(true){
+		temp = writev(SockFd,Iv,IvCount);
+		if(temp <= -1){
+			if(errno == EAGAIN){
+				//当前TCP缓冲区没有可写空间
+				ModifyFd(EpollFd,SockFd,EPOLLOUT);//更改sockfd状态，等待下一个的可写事件
+				return true;
+			}
+			unmap();//解除映射
+			return false;
+		}
+	    bytes_to_send -= temp;//已经写了temp个字节，减去
+	    bytes_have_send += temp;//增加已写字节数
+	    if(bytes_to_send <= bytes_have_send){ //发送Http响应成功
+	    	unmap();
+	    	if(Linger)//根据Http请求的Connection字段决定是否立即关闭连接
+	    	{
+	    		Init();//重新初始化连接的状态
+	    		ModifyFd(EpollFd,SockFd,EPOLLIN);//重新设置为输入监听
+	    		return true;
+	    	}
+	    	else{
+	    		ModifyFd(EpollFd,SockFd,EPOLLIN);//重新设置为输入监听
+	    		return true;
+	    	}
+	    }
+	}
+}
+//向写缓冲区中写入待发送的数据
+bool HttpConnection::AddReponse(const char* format,...){
+	if(WritePos >= WRITE_BUFFER_SIZE){ //TCP缓冲区已经满了
+		return false;
+	}
+	va_list arg_list;//可变参数列表
+	va_start(arg_list,format); //获取参数，字符串格式
+	int len = vsnprintf(WriteBuffer + WritePos,WRITE_BUFFER_SIZE-1-WritePos,
+		                format,arg_list);
+	if(len >= (WRITE_BUFFER_SIZE-1-WritePos)){
+		return false;
+	}
+	WritePos += len;
+	va_end(arg_list);//结束获取
+	return true;
+}
+bool HttpConnection::AddStatusLine(int status,const char* title){
+	return AddReponse("%s %d %s\r\n","HTTP/1.1",status,title);//调用可变参数函数
+}
+bool HttpConnection::AddHeaders(int content_length){
+	AddContentLength(content_length);//添加content_length字段
+	AddLinger();//添加长连接选项
+	AddBlankLine();//添加空行
+}
+//添加Content-Length字段
+bool HttpConnection::AddContentLength(int content_length){
+	return AddReponse("Content-Length: %d\r\n",content_length);//写入一行内容长度字段
+}
+//添加Connection字段
+bool HttpConnection::AddLinger(){
+	//根据当前Http连接的状态，决定是否使用长连接，并保存为字段
+	return AddReponse("Connection: %s\r\n",(Linger == true?)"keep-alive":"close");
+}
+//添加空白行
+bool HttpConnection::AddBlankLine(){
+	return AddReponse("%s","\r\n");//使用\r\n来实现换行
+}
+//添加Http请求的Content字段
+bool HttpConnection::AddContent(const char* text){
+   return AddReponse("%s",text);
+}
+//解除映射
+void HttpConnection::unmap(){
+	if(FileAddress){
+		munmap(FileAddress,FileStat.size);//解除文件映射
+		FileAddress = 0;//地址清零
+	}
+}
+
+//处理Http请求，分析
+HttpConnection::HTTP_CODE HttpConnection::DoRequest(){
+	strcpy(RealFile,doc_root);
+	size_t len = strlen(doc_root);//文档根路径字符串长度
+	//将请求url中的文件信息与文件根路径字符串进行拼接
+	strncpy(RealFile,Url,FILENAME_MAX_LEN-len-1);
+	if(stat(RealFile,&FileStat) < 0){
+		//找不到资源
+		return NO_RESOURCE;
+	}
+	//判断请求的文件是否为目录，如果为目录则返回BAD_REQUEST
+	if(S_ISDIR(FileStat.st_mode)){ 
+		return BAD_REQUEST;
+	} 
+	
+
 }
