@@ -28,9 +28,12 @@ private:
    char* WriteData;
    char buffer[DEFAULT_BUFFER_SIZE];
 public:
-   
+   ClientData(sockaddr_in addr,port):address(addr),port(port),WriteData(nullptr)
+   {
+     //客户端信息结构体，构造函数
+   }
+   ~ClientData(){ }
 };
-
 
 static int pipefd[2];//管道数组定义
 static int epollfd;//epoll描述符

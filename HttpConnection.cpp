@@ -1,4 +1,25 @@
 #include "HttpConnection.h"
+using namespace std;
+
+//网站的根目录路径
+const char* doc_root = "/var/ChenwxJay/html";
+int HttpConnection::UserCount = 0;//静态变量，用户数量初始化为0
+int HttpConnection::EpollFd = -1;//epoll fd,初始值为-1
+
+//向epoll内核注册事件表中注册fd和需要监听的事件，并设置非阻塞模式
+void AddFd(int EpollFd,int fd,bool one_shot){
+	//创建一个epoll event 
+	epoll_event event;
+	event.data.fd = fd;//填充fd
+	event.events = EPOLLIN | EPOLLET | EPOLLHUP;//注意关注的事件类型
+	if(one_shot){ //判断是否要
+      event.events |= EPOLLONESHOT;
+	}
+	//注册epoll event
+	epoll_ctl(EpollFd,EPOLL_CTL_ADD,fd,&event);
+	//设置套接字fd为非阻塞模式
+	SetNonBlocking(fd);
+}
 
 //从epoll内核注册事件表中删除fd
 void RemoveFd(int epollfd,int fd){
@@ -107,6 +128,23 @@ HttpConnection::HTTP_CODE HttpConnection::ParseRequestLine(char* text){
 	if(!Version){
        return BAD_REQUEST;//错误请求
 	}
+	*Version++ = '\0';
+	Version += strspn(Version," \t");
+	if(strcasecmp(Vsersion,"HTTP/1.1") ！= 0){
+		return BAD_REQUEST;//协议版本错误，返回400
+	}
+	//校验URL
+	if(strncasecmp(Url,"http://",7) == 0){
+         Url += 7;//指针偏移
+         Utl = strchr(Url,'/');//查找第一次出现/的位置，用于后面分割
+	}
+	//校验后面的URL部分是否有错
+	if(!Url || Url[0] != '/'){
+		 return BAD_REQUEST;
+	}
+	//设置当前解析状态
+	CheckState = CHECK_HEADER;
+	return NO_REQUEST;
 }
 //由线程池中的工作线程调用，这是处理Http请求的入口函数
 void HttpConnection::Process(){
@@ -178,9 +216,7 @@ HttpConnection::HTTP_CODE HttpConnection::ProcessRead(){
 	}
 	return NO_REQUEST;//正常执行
 }
-HttpConnection::LINE_STATUS HttpConnection::ParseRequestLineLine(char* text){
-   
-}
+
 //解析Http请求头部字段函数
 HttpConnection:: HTTP_CODE HttpConnection::ParseHeaders(char* text){
 	if(text[0] == '\0'){
@@ -397,6 +433,11 @@ HttpConnection::HTTP_CODE HttpConnection::DoRequest(){
 	if(S_ISDIR(FileStat.st_mode)){ 
 		return BAD_REQUEST;
 	} 
-	
-
+	//校验成功之后，打开文件
+	int FileFd = open(RealFile,O_RDONLY);//只读方式打开
+	//映射到一个内存上
+	FileAddress = (char*) mmap(0,FileStat.st_size,PORT_READ,MAP_PRIVATE,fd,0);
+	close(FileFd);//映射完成之后关闭文件描述符
+	//通知调用者，请求文件成功
+	return FILE_REQUEST;
 }
