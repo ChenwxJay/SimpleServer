@@ -25,11 +25,19 @@ class ClientData{
 private:
    sockaddr_in address;
    int port;
+   int fd; //客户端对应的描述符
+   int events;//该用户需要监听的事件，用于epoll
    char* WriteData;
    char buffer[DEFAULT_BUFFER_SIZE];
 public:
-   ClientData(sockaddr_in addr,port):address(addr),port(port),WriteData(nullptr)
-   {
+   ClientData(int fd,int events):fd(fd),events(events),WriteData(nullptr){
+      //构造函数,只初始化fd和events
+   }
+   ClientData(){
+      //默认构造函数
+   }
+   ClientData(sockaddr_in addr,int port,int fd,int events):address(addr),port(port),WriteData(nullptr),fd(-1),events(0)
+   {  
      //客户端信息结构体，构造函数
    }
    ~ClientData(){ }
@@ -37,6 +45,7 @@ public:
 
 static int pipefd[2];//管道数组定义
 static int epollfd;//epoll描述符
+static int user_count = 0; //记录当前用户数
 
 static int SetNoBlocking(int fd){
    int old_option = fcntl(fd,F_GETFL);
@@ -87,6 +96,11 @@ int main(int argc,char* argv[]){
    int AcceptFd = 0;//监听套接字描述符定义
    struct sockaddr_in ServerAddr;
    int len = sizeof(ServerAddr);
+
+   ClientData clients[MAX_CONNECTION_SIZE];//创建用户数组，每个用户对应一个连接
+   for(int i = 0;i <MAX_CONNECTION_SIZE;i++){
+      clients[i].
+   }
 
    //创建套接字
    AcceptFd = socket(AF_INET,SOCK_STREAM,0);
